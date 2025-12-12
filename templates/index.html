@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>HRI Sim: Sandwich Task</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&display=swap');
+        body { font-family: 'Fira Code', monospace; }
+        .terminal-scroll::-webkit-scrollbar { width: 8px; }
+        .terminal-scroll::-webkit-scrollbar-track { background: #1a202c; }
+        .terminal-scroll::-webkit-scrollbar-thumb { background: #4a5568; }
+        .disabled { opacity: 0.5; pointer-events: none; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 h-screen flex flex-col overflow-hidden">
+
+    <div id="start-screen" class="fixed inset-0 bg-gray-900/95 flex items-center justify-center z-50 p-6 transition-opacity duration-300">
+        <div class="bg-gray-800 border-2 border-green-500 rounded-xl shadow-2xl max-w-2xl w-full text-sm p-8 space-y-6">
+            <h2 class="text-3xl font-bold text-green-400 text-center border-b border-gray-700 pb-3">HRI Sim: Collaborative Sandwich Task</h2>
+            
+            <div class="text-gray-300 space-y-4">
+                <p class="text-lg font-semibold text-center text-yellow-300">Your Goal:</p>
+                <p class="text-center text-xl font-bold text-white">Make a complete sandwich and ring the bell!</p>
+                
+                <div class="bg-gray-900 p-4 rounded border border-gray-700">
+                    <p class="text-purple-400 font-bold mb-2">Flask Connection Status:</p>
+                    <p id="connection-status" class="text-gray-400">Waiting to connect...</p>
+                </div>
+
+                <hr class="border-gray-700">
+                
+                <h3 class="text-lg font-semibold text-blue-400">Available Commands:</h3>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <ul class="list-disc pl-5 space-y-1">
+                            <li><code class="bg-gray-700 p-1 rounded">move [direction]</code> </li>
+                            <li><code class="bg-gray-700 p-1 rounded">look</code></li>
+                            <li><code class="bg-gray-700 p-1 rounded">take [item]</code></li>
+                            <li><code class="bg-gray-700 p-1 rounded">drop [item]</code></li>
+                        </ul>
+                    </div>
+                    <div>
+                         <ul class="list-disc pl-5 space-y-1">
+                            <li><code class="bg-gray-700 p-1 rounded">say [message]</code></li>
+                            <li><code class="bg-gray-700 p-1 rounded">slice [ham]</code></li>
+                            <li><code class="bg-gray-700 p-1 rounded">wash lettuce</code></li>
+                            <li><code class="bg-gray-700 p-1 rounded">make sandwich</code></li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <button onclick="startGame()" class="mt-6 bg-green-600 hover:bg-green-700 text-white font-bold text-lg px-6 py-3 rounded-lg w-full transition duration-150 shadow-md">
+                Start Simulation
+            </button>
+        </div>
+    </div>
+
+    <header class="bg-gray-800 border-b border-gray-700 p-4 flex justify-between items-center shrink-0">
+        <div>
+            <h1 class="text-xl font-bold text-green-400">HRI Sim: Sandwich Task</h1>
+        </div>
+        
+        <div class="flex items-center space-x-3">
+            <label class="text-xs text-gray-300 mr-1">Mode:</label>
+            <select id="modeSelect" onchange="toggleMode()" class="bg-gray-700 border border-gray-600 text-white text-xs rounded p-2 focus:ring-green-500 focus:border-green-500">
+                <option value="agent">Player + Agent (PDDL)</option>
+                <option value="manual">2 Player (Manual)</option>
+            </select>
+
+            <div class="h-6 w-px bg-gray-600 mx-2"></div>
+            <button onclick="resetGame()" class="bg-red-600 hover:bg-red-700 text-white px-3 py-2 rounded text-sm transition">Reset</button>
+        </div>
+    </header>
+
+    <main class="flex-1 flex overflow-hidden">
+        <section class="flex-1 flex flex-col border-r border-gray-700 bg-gray-900 relative">
+            <div class="absolute top-0 right-0 bg-blue-900 text-blue-200 text-xs px-2 py-1 rounded-bl">AGENT A (P1 - HUMAN)</div>
+            <div id="log-p1" class="flex-1 p-4 overflow-y-auto terminal-scroll space-y-2 text-sm"></div>
+            
+            <div class="bg-gray-800 p-2 text-xs border-t border-gray-700 grid grid-cols-2 gap-2">
+                <div>LOC: <span id="loc-p1" class="text-blue-300">Kitchen</span></div>
+                <div>INV: <span id="inv-p1" class="text-yellow-300">Empty</span></div>
+            </div>
+
+            <div class="p-2 bg-gray-800 border-t border-gray-700 flex">
+                <span class="text-green-500 mr-2">></span>
+                <input type="text" id="input-p1" class="bg-transparent border-none focus:ring-0 text-white w-full outline-none font-mono" placeholder="Enter command..." autocomplete="off">
+            </div>
+        </section>
+
+        <section class="flex-1 flex flex-col bg-gray-900 relative">
+            <div class="absolute top-0 right-0 bg-purple-900 text-purple-200 text-xs px-2 py-1 rounded-bl">AGENT B (P2 - ROBOT)</div>
+            <div id="log-p2" class="flex-1 p-4 overflow-y-auto terminal-scroll space-y-2 text-sm"></div>
+
+            <div class="bg-gray-800 p-2 text-xs border-t border-gray-700 grid grid-cols-2 gap-2">
+                <div>LOC: <span id="loc-p2" class="text-blue-300">Kitchen</span></div>
+                <div>INV: <span id="inv-p2" class="text-yellow-300">Empty</span></div>
+            </div>
+
+            <div class="p-2 bg-gray-800 border-t border-gray-700 flex">
+                <span class="text-green-500 mr-2">></span>
+                <input type="text" id="input-p2" class="bg-transparent border-none focus:ring-0 text-white w-full outline-none font-mono disabled" placeholder="Agent is thinking..." disabled>
+            </div>
+        </section>
+    </main>
+
+    <script>
+        // -----------------------------
+        // Game Configuration
+        // -----------------------------
+        
+        const FIXED_ITEMS = ['sink', 'cutting board and knife', 'plate']; 
+        const AGENT_DELAY_MS = 3000; // Agent acts every 3 seconds
+        
+        const RECIPES = {
+            "sandwich": ["bread", "cheese", "sliced-ham", "washed-lettuce"]
+        };
+
+        const PREP_RULES = {
+            "slice": {
+                requiredPresent: "cutting board and knife",
+                validIngredients: { "ham": "sliced-ham" }
+            },
+            "wash": {
+                requiredPresent: "sink",
+                validIngredients: { "lettuce": "washed-lettuce" }
+            }
+        };
+
+        let gameState = null;
+        let gameMode = 'agent'; 
+        let agentTimer = null;
+        
+        // PDDL PARSER STATE
+        let pddlQueue = [];
+        let planIndex = 0;
+
+        // -----------------------------
+        // PDDL PARSER & ROBUST LOGIC
+        // -----------------------------
+
+        // 1. Fetch Plan from Flask
+        function fetchPlanFromServer() {
+            const statusEl = document.getElementById('connection-status');
+            statusEl.textContent = "Fetching plan from /get-plan...";
+            statusEl.className = "text-yellow-400";
+
+            fetch('/get-plan')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        statusEl.textContent = "Plan Loaded Successfully!";
+                        statusEl.className = "text-green-400";
+                        loadPlan(data.plan);
+                    } else {
+                        statusEl.textContent = "Error: " + data.error;
+                        statusEl.className = "text-red-400";
+                    }
+                })
+                .catch(error => {
+                    statusEl.textContent = "Connection Failed. Is Flask running?";
+                    statusEl.className = "text-red-400";
+                    console.error("Network error:", error);
+                });
+        }
+
+        // 2. Parse Raw PDDL Text
+        function loadPlan(planText) {
+            pddlQueue = [];
+            planIndex = 0;
+            const lines = planText.split('\n');
+            
+            lines.forEach(line => {
+                // Remove parentheses and split
+                const parts = line.trim().replace(/^\(|\)$/g, '').split(/\s+/);
+                if (parts.length < 2) return; 
+
+                const action = parts[0];
+                const actor = parts[1];
+                const args = parts.slice(2);
+
+                // Only load P2 commands
+                if (actor === 'p2') {
+                    pddlQueue.push({ action, args, original: line });
+                }
+            });
+            
+            log('p2', `Plan received: ${pddlQueue.length} steps loaded.`, 'text-purple-400');
+            console.log("PDDL Queue:", pddlQueue);
+        }
+
+        // 3. Name Resolution (PDDL -> Game)
+        function resolveName(pddlName, availableItems) {
+            // Exact match
+            if (availableItems.includes(pddlName)) return pddlName;
+            // Transformed match
+            if (pddlName === 'ham' && availableItems.includes('sliced-ham')) return 'sliced-ham';
+            if (pddlName === 'lettuce' && availableItems.includes('washed-lettuce')) return 'washed-lettuce';
+            return null;
+        }
+
+        // 4. The Agent Logic (Robust Executor)
+        function getNextAgentCommand() {
+            if (planIndex >= pddlQueue.length) {
+                // If plan is done, do nothing
+                return null; 
+            }
+
+            const step = pddlQueue[planIndex];
+            const p2 = gameState.players.p2;
+            const roomItems = gameState.rooms[p2.room].items;
+            
+            // Debug Log
+            document.getElementById('input-p2').placeholder = `Trying: ${step.action}...`;
+
+            // --- EXECUTOR ---
+
+            // ACTION: MOVE
+            if (step.action === 'move') {
+                const [from, to] = step.args;
+                
+                // If already at dest, success -> next step
+                if (p2.room === to) {
+                    planIndex++;
+                    return null; 
+                }
+                
+                // If at start, move
+                if (p2.room === from) {
+                    planIndex++; // Assume success
+                    return `move ${to}`;
+                }
+                
+                // Recovery: Just try to move to target
+                return `move ${to}`;
+            }
+
+            // ACTION: TAKE
+            if (step.action === 'take') {
+                const [item, loc] = step.args;
+
+                // Ensure we are in the room
+                if (p2.room !== loc) return `move ${loc}`; 
+
+                // Check if item is actually here (Robustness)
+                const target = resolveName(item, roomItems);
+
+                if (target) {
+                    planIndex++;
+                    return `take ${target}`;
+                } else {
+                    // Item not found -> WAIT (Return null)
+                    return null; 
+                }
+            }
+
+            // ACTION: DROP
+            if (step.action === 'drop') {
+                const [item, loc] = step.args;
+                
+                const target = resolveName(item, p2.inventory);
+                if (target) {
+                    planIndex++;
+                    return `drop ${target}`;
+                }
+                return null; // Wait until we hold it
+            }
+
+            // ACTION: SLICE
+            if (step.action === 'slice-ham') {
+                if (p2.inventory.includes('ham')) {
+                    planIndex++;
+                    return 'slice ham';
+                }
+                return null; // Wait for ham
+            }
+
+            // ACTION: WASH
+            if (step.action === 'wash-lettuce') {
+                if (p2.inventory.includes('lettuce')) {
+                    planIndex++;
+                    return 'wash lettuce';
+                }
+                return null; // Wait for lettuce
+            }
+
+            // ACTION: MAKE
+            if (step.action === 'make-sandwich') {
+                const required = ['bread', 'cheese', 'sliced-ham', 'washed-lettuce'];
+                const missing = required.filter(i => !roomItems.includes(i));
+                
+                if (missing.length === 0) {
+                    planIndex++;
+                    return 'make sandwich';
+                }
+                return null; // Wait for ingredients
+            }
+
+            // Unknown command in PDDL
+            planIndex++; 
+            return null;
+        }
+
+        // -----------------------------
+        // STANDARD GAME ENGINE
+        // -----------------------------
+
+        function initGame() {
+            gameState = {
+                rooms: {
+                    kitchen: {
+                        name: "Kitchen",
+                        desc: "Stainless steel surfaces. There is also a sink present.",
+                        exits: { north: "pantry"},
+                        items: ["cutting board and knife", "sink", "cheese", "lettuce" ]
+                    },
+                    pantry: {
+                        name: "Pantry",
+                        desc: "Ingredient storage.",
+                        exits: { south: "kitchen" },
+                        items: ["bread", "ham"]
+                    },
+                },
+                players: {
+                    p1: { id: "p1", name: "Agent A", room: "kitchen", inventory: [] },
+                    p2: { id: "p2", name: "Agent B", room: "kitchen", inventory: [] }
+                },
+                gameOver: false
+            };
+            
+            stopAgentLoop();
+            
+            document.getElementById('log-p1').innerHTML = '<div class="text-gray-500 italic">System ready.</div>';
+            document.getElementById('log-p2').innerHTML = '<div class="text-gray-500 italic">System ready.</div>';
+            
+            toggleMode();
+            updateUI();
+        }
+        
+        function startGame() {
+            document.getElementById('start-screen').classList.add('opacity-0');
+            setTimeout(() => {
+                document.getElementById('start-screen').classList.add('hidden');
+                initGame(); 
+                processCommand('p1', 'look'); 
+                processCommand('p2', 'look'); 
+                
+                // Fetch Plan from Flask
+                fetchPlanFromServer();
+
+                if (gameMode === 'agent') {
+                    startAgentLoop();
+                }
+            }, 300);
+        }
+
+        function toggleMode() {
+            const select = document.getElementById('modeSelect');
+            gameMode = select.value;
+            const p2Input = document.getElementById('input-p2');
+
+            if (gameMode === 'agent') {
+                p2Input.disabled = true;
+                p2Input.classList.add('disabled');
+                p2Input.placeholder = "Agent is thinking...";
+                document.getElementById('log-p1').innerHTML += '<div class="text-yellow-500">[SYSTEM] AI Agent Enabled (PDDL Mode)</div>';
+                if (gameState && !document.getElementById('start-screen').classList.contains('hidden')) {
+                     startAgentLoop();
+                }
+            } else {
+                p2Input.disabled = false;
+                p2Input.classList.remove('disabled');
+                p2Input.placeholder = "Enter P2 command...";
+                document.getElementById('log-p1').innerHTML += '<div class="text-yellow-500">[SYSTEM] Manual Mode Enabled</div>';
+                stopAgentLoop();
+            }
+        }
+
+        function startAgentLoop() {
+            stopAgentLoop();
+            if (gameState.gameOver) return;
+            agentTimer = setTimeout(runAgentTick, 1000);
+        }
+
+        function stopAgentLoop() {
+            if (agentTimer) clearTimeout(agentTimer);
+            agentTimer = null;
+        }
+
+        function runAgentTick() {
+            if (gameMode !== 'agent' || gameState.gameOver) return;
+
+            const p2Input = document.getElementById('input-p2');
+            
+            // Get command (returns NULL if waiting for robustness)
+            const command = getNextAgentCommand();
+            
+            if (command) {
+                p2Input.placeholder = `Executing: ${command}`;
+                processCommand('p2', command);
+            } else {
+                p2Input.placeholder = `Waiting for conditions...`;
+            }
+
+            // Schedule next tick
+            agentTimer = setTimeout(runAgentTick, AGENT_DELAY_MS);
+        }
+
+        // -----------------------------
+        // COMMAND PROCESSOR & HANDLERS
+        // -----------------------------
+
+        function processCommand(pid, cmdRaw) {
+            if (gameState.gameOver && cmdRaw !== 'reset') return;
+            if (!cmdRaw) return;
+
+            const player = gameState.players[pid];
+            const cmd = cmdRaw.trim().toLowerCase().split(' ');
+            const verb = cmd[0];
+            const noun = cmd.slice(1).join(' ');
+
+            log(pid, `> ${cmdRaw}`, 'text-gray-400');
+
+            if (['move'].includes(verb)) handleMove(pid, noun);
+            else if (['look'].includes(verb)) handleLook(pid);
+            else if (['take'].includes(verb)) handleTake(pid, noun);
+            else if (['drop'].includes(verb)) handleDrop(pid, noun);
+            else if (['make'].includes(verb)) handleMake(pid, noun);
+            else if (['slice', 'wash'].includes(verb)) handlePrep(pid, verb, noun);
+            else if (['say'].includes(verb)) handleSay(pid, noun);
+            else log(pid, "Unknown command.", 'text-red-500');
+
+            updateUI();
+        }
+
+        function handleSay(pid, msg) {
+            const otherPid = pid === 'p1' ? 'p2' : 'p1';
+            log(pid, `You say: "${msg}"`, 'text-cyan-300');
+            log(otherPid, `${gameState.players[pid].name} says: "${msg}"`, 'text-cyan-300');
+        }
+
+        function handleMove(pid, dir) {
+            const p = gameState.players[pid];
+            const room = gameState.rooms[p.room];
+            let dest = room.exits[dir];
+            
+            // Allow typing "move pantry" instead of just "move north"
+            if (!dest) {
+                for(const [key, r] of Object.entries(gameState.rooms)) {
+                    if (key === dir || r.name.toLowerCase() === dir) dest = key;
+                }
+            }
+
+            if (dest) {
+                p.room = dest;
+                log(pid, `Moved to ${gameState.rooms[dest].name}.`, 'text-green-400');
+                handleLook(pid);
+                const otherPid = pid === 'p1' ? 'p2' : 'p1';
+                if (gameState.players[otherPid].room === dest) {
+                    log(otherPid, `${p.name} entered the room.`, 'text-yellow-500');
+                }
+            } else {
+                log(pid, "Can't go that way.", 'text-red-400');
+            }
+        }
+
+        function handleLook(pid) {
+            const p = gameState.players[pid];
+            const r = gameState.rooms[p.room];
+            log(pid, `[${r.name}] ${r.desc}`, 'text-blue-400');
+            if (r.items.length) log(pid, `Visible: ${r.items.join(', ')}`, 'text-yellow-300');
+            const otherPid = pid === 'p1' ? 'p2' : 'p1';
+            if (gameState.players[otherPid].room === p.room) {
+                log(pid, `${gameState.players[otherPid].name} is here.`, 'text-pink-400');
+            }
+        }
+
+        function handleTake(pid, item) {
+            const p = gameState.players[pid];
+            const r = gameState.rooms[p.room];
+            
+            if (FIXED_ITEMS.includes(item)) {
+                log(pid, `The ${item} is fixed in place.`, 'text-red-400');
+                return;
+            }
+
+            if (p.inventory.length > 0) {
+                 log(pid, `Inventory full. Drop ${p.inventory[0]} first.`, 'text-red-400');
+                 return;
+            }
+
+            const idx = r.items.indexOf(item);
+            if (idx > -1) {
+                r.items.splice(idx, 1);
+                p.inventory.push(item);
+                log(pid, `Took ${item}.`, 'text-green-300');
+                broadcastRoom(p.room, pid, `${p.name} picked up ${item}.`);
+            } else {
+                log(pid, "Don't see that here.", 'text-red-400');
+            }
+        }
+
+        function handleDrop(pid, item) {
+            const p = gameState.players[pid];
+            const idx = p.inventory.indexOf(item);
+            if (idx > -1) {
+                p.inventory.splice(idx, 1);
+                gameState.rooms[p.room].items.push(item);
+                log(pid, `Dropped ${item}.`, 'text-green-300');
+                broadcastRoom(p.room, pid, `${p.name} dropped ${item}.`);
+            } else {
+                log(pid, "You don't have that.", 'text-red-400');
+            }
+        }
+
+        function handlePrep(pid, verb, noun) {
+            let action = verb; 
+            let target = noun;
+
+            const p = gameState.players[pid];
+            const room = gameState.rooms[p.room];
+            const rule = PREP_RULES[action];
+
+            if (!p.inventory.includes(target)) {
+                log(pid, `You must be holding the ${target}.`, 'text-red-400');
+                return;
+            }
+
+            if (!room.items.includes(rule.requiredPresent)) {
+                log(pid, `You need a(n) ${rule.requiredPresent} nearby.`, 'text-red-400');
+                return;
+            }
+
+            const result = rule.validIngredients[target];
+            if (!result) {
+                log(pid, `You can't ${action} ${target}.`, 'text-red-400');
+                return;
+            }
+
+            p.inventory[p.inventory.indexOf(target)] = result;
+            log(pid, `Success: You processed ${target} into ${result}.`, 'text-green-400');
+            broadcastRoom(p.room, pid, `${p.name} prepared the ${target}.`);
+        }
+
+        function handleMake(pid, noun) {
+            const p = gameState.players[pid];
+            const roomItems = gameState.rooms[p.room].items;
+            
+            if (noun !== 'sandwich' || p.room !== 'kitchen') {
+                log(pid, "Can only make sandwich in Kitchen.", 'text-red-400');
+                return;
+            }
+
+            const ingredients = RECIPES['sandwich'];
+            const missing = ingredients.filter(i => !roomItems.includes(i));
+
+            if (missing.length > 0) {
+                log(pid, `Missing ingredients on floor: ${missing.join(', ')}`, 'text-red-400');
+                return;
+            }
+
+            // Consume ingredients
+            ingredients.forEach(i => {
+                const idx = roomItems.indexOf(i);
+                if (idx > -1) roomItems.splice(idx, 1);
+            });
+            
+            p.inventory.push('sandwich');
+            broadcast("Congrats! You successfully assembled a perfect sandwich!!!",'text-green-400');
+            gameState.gameOver = true;
+            stopAgentLoop();
+        }
+
+        // --- UTILS ---
+        function log(pid, msg, cls) {
+            const el = document.getElementById(`log-${pid}`);
+            const div = document.createElement('div');
+            div.className = cls;
+            div.textContent = msg;
+            el.appendChild(div);
+            el.scrollTop = el.scrollHeight;
+        }
+
+        function broadcast(msg, cls) {
+            log('p1', msg, cls);
+            log('p2', msg, cls);
+        }
+        
+        function broadcastRoom(roomKey, actorId, msg) {
+            const otherPid = actorId === 'p1' ? 'p2' : 'p1';
+            if (gameState.players[otherPid].room === roomKey) {
+                log(otherPid, msg, 'text-gray-500');
+            }
+        }
+
+        function updateUI() {
+            if (!gameState) return;
+            document.getElementById('loc-p1').textContent = gameState.rooms[gameState.players.p1.room].name;
+            document.getElementById('inv-p1').textContent = gameState.players.p1.inventory.join(', ') || 'Empty';
+            document.getElementById('loc-p2').textContent = gameState.rooms[gameState.players.p2.room].name;
+            document.getElementById('inv-p2').textContent = gameState.players.p2.inventory.join(', ') || 'Empty';
+        }
+
+        function resetGame() { 
+            location.reload(); 
+        }
+
+        document.getElementById('input-p1').addEventListener('keypress', (e) => {
+            if(e.key === 'Enter') { processCommand('p1', e.target.value); e.target.value = ''; }
+        });
+        document.getElementById('input-p2').addEventListener('keypress', (e) => {
+            if(e.key === 'Enter') { processCommand('p2', e.target.value); e.target.value = ''; }
+        });
+
+        // Start screen visible on load
+        document.getElementById('start-screen').classList.remove('hidden');
+        // Pre-check Flask connection
+        fetchPlanFromServer();
+
+    </script>
+</body>
+</html>
