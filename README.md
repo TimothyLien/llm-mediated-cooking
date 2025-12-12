@@ -7,7 +7,7 @@ A large language model–mediated task planner for human–robot collaboration (
 Clone the repository **with submodules**, as the project depends on the `downward` PDDL planner:
 
 ```
-git clone --recurse-submodules git@github.com:TimothyLien/llm-mediated-cooking.git
+git clone --recurse-submodules https://github.com:TimothyLien/llm-mediated-cooking.git
 cd llm-mediated-cooking
 ```
 
