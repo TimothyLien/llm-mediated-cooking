@@ -8,7 +8,7 @@ Clone the repository **with submodules**, as the project depends on the `downwar
 
 ```
 git clone --recurse-submodules git@github.com:TimothyLien/llm-mediated-cooking.git
-cd ll-mediated-cooking
+cd llm-mediated-cooking
 ```
 
 ## **Environment**
