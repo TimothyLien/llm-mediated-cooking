@@ -3,7 +3,6 @@ import json
 class KnowledgeBase:
 
     def __init__(self):
-        """Initializes the new, empty knowledge base state."""
         self.state = {
             "human_preference": [],
             "human_limitations": [],
@@ -13,78 +12,95 @@ class KnowledgeBase:
         print("[KB] KnowledgeBase initialized (empty).")
 
     def reset(self):
-        """Resets the knowledge base to an empty state."""
         self.state = {
             "human_preference": [],
             "human_limitations": [],
             "robot_limitations": [],
             "environmental_factors": []
         }
-        print("[KB] KnowledgeBase has been reset to empty state.")
+        print("[KB] KnowledgeBase reset to empty state.")
 
     def get_state_as_string(self):
-        """Returns a string representation of the KB for the LLM prompt."""
-        return json.dumps(self.state, indent=2)
+        """
+        Returns a JSON string of the KB for LLM prompts.
+        Shows only 'fact' strings (hides pddl_removal) for readability.
+        """
+        simplified = {}
+        for category, facts in self.state.items():
+            simplified[category] = [
+                f["fact"] if isinstance(f, dict) else f
+                for f in facts
+            ]
+        return json.dumps(simplified, indent=2)
 
     def get_state(self):
-        """Returns the raw state dictionary."""
         return self.state
+
+    def get_pddl_removals(self):
+        """
+        Returns a deduplicated list of PDDL predicates that should be removed
+        from :init. Deduplication prevents the same predicate being applied twice
+        when multiple KB entries map to the same PDDL fact.
+        """
+        seen = set()
+        removals = []
+        for facts in self.state.values():
+            for fact in facts:
+                if isinstance(fact, dict) and fact.get("pddl_removal"):
+                    pred = fact["pddl_removal"]
+                    if pred not in seen:
+                        seen.add(pred)
+                        removals.append(pred)
+        return removals
 
     def update_kb_from_llm(self, updates_data):
         """
-        Parses update data from the LLM and applies them to the current state.
-        
-        The function must handle two possible update formats from the LLM engine:
-        1. A LIST of fact dictionaries (Legacy/Simple format).
-        2. A DICTIONARY where keys are KB categories (The full desired state).
-        
-        This implementation assumes the KB must be reset if the LLM provides 
-        a complete, new state dictionary.
+        APPENDS new facts from the LLM to the KB. Never resets.
+
+        The LLM now returns only the delta (new facts from the current message),
+        not the full KB state. Accumulation is handled here, not by the LLM.
+
+        Supported input formats:
+          List:  [{"type": "robot_limitations", "fact": "...", "pddl_removal": "..."}]
+          Dict:  {"robot_limitations": [{"fact": "...", "pddl_removal": "..."}], ...}
+
+        The 'pddl_removal' field is optional in both formats.
         """
-
         if not updates_data:
-            return 0 
+            return
 
-        print(f"Updating [KB] with update(s) from LLM...")
-        
-        # Scenario 1: LLM returned the full, complete state dictionary (as seen in the failed log)
+        print("[KB] Appending update(s) from LLM...")
+
         if isinstance(updates_data, dict):
-            
-            # --- CRITICAL FIX ---
-            # Resetting the state to ensure cumulative facts are applied correctly
-            self.reset()
-            
-            for update_type, facts_list in updates_data.items():
-                if update_type in self.state and isinstance(facts_list, list):
-                    # Replace the entire fact list with the LLM's new list
-                    self.state[update_type] = facts_list
+            for category, facts_list in updates_data.items():
+                if category in self.state and isinstance(facts_list, list):
                     for fact in facts_list:
-                        # Print statement for visibility (assuming 'fact' is a string)
-                        print(f"[KB] Added to '{update_type}': {fact}")
+                        self.state[category].append(fact)
+                        label = fact.get("fact") if isinstance(fact, dict) else fact
+                        removal = fact.get("pddl_removal") if isinstance(fact, dict) else None
+                        print(f"[KB] Added to '{category}': {label}" +
+                              (f" → remove {removal}" if removal else ""))
                 else:
-                    print(f"[KB Warning] Invalid update type or format for type: {update_type}")
-            
-            return len(self.state.get("robot_limitations", []))
-            
-        # Scenario 2: LLM returned the legacy LIST of fact dictionaries (your original intent)
-        elif isinstance(updates_data, list):
-            
-            # Since the LLM is expected to return ALL facts, we reset first.
-            self.reset()
+                    print(f"[KB Warning] Unknown category or bad format: '{category}'")
 
+        elif isinstance(updates_data, list):
             for update in updates_data:
                 if not isinstance(update, dict):
-                    print(f"[KB Warning] Skipping invalid update item (not a dictionary): {update}")
+                    print(f"[KB Warning] Skipping non-dict item: {update}")
                     continue
-                    
-                update_type = update.get("type")
-                update_fact = update.get("fact")
-                
-                if update_type in self.state and update_fact:
-                    # Append the string fact to the correct list
-                    self.state[update_type].append(update_fact)
-                    print(f"[KB] Added to '{update_type}': {update_fact}")
+
+                category = update.get("type")
+                fact_text = update.get("fact")
+                pddl_removal = update.get("pddl_removal")  # May be None
+
+                if category in self.state and fact_text:
+                    entry = {"fact": fact_text}
+                    if pddl_removal:
+                        entry["pddl_removal"] = pddl_removal
+                    self.state[category].append(entry)
+                    print(f"[KB] Added to '{category}': {fact_text}" +
+                          (f" → remove {pddl_removal}" if pddl_removal else ""))
                 else:
-                    print(f"[KB Warning] Unknown update type or missing fact: {update_type}")
+                    print(f"[KB Warning] Unknown category or missing fact: '{category}'")
         else:
-             print(f"[KB ERROR] Update data received in unexpected format: {type(updates_data)}")
+            print(f"[KB ERROR] Unexpected update format: {type(updates_data)}")

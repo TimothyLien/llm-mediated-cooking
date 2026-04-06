@@ -5,189 +5,98 @@ from groq import Groq
 from dotenv import load_dotenv
 import sys
 
-
 load_dotenv()
 
 try:
-    # Initialize the Groq Client
-    client = Groq(
-        api_key=os.environ["GROQ_API_KEY"],
-    )
+    client = Groq(api_key=os.environ["GROQ_API_KEY"])
 except KeyError:
-    print("="*50)
+    print("=" * 50)
     print("ERROR: GROQ_API_KEY not found. Please set it in your .env file.")
-    print("="*50)
+    print("=" * 50)
     sys.exit(1)
 except Exception as e:
-    # Catch broader connection/initialization errors
-    print("="*50)
+    print("=" * 50)
     print(f"ERROR: Groq client initialization failed: {e}")
-    print("="*50)
+    print("=" * 50)
     sys.exit(1)
 
-# Define models for specific tasks
+# Separate model names allow independent tuning per task
 MODEL_CHAT = "llama-3.3-70b-versatile"
-MODEL_PDDL_MODIFY = "llama-3.3-70b-versatile" # Dedicated model for syntax-critical tasks
+MODEL_EXTRACT = "llama-3.3-70b-versatile"
+MODEL_SUMMARIZE = "llama-3.3-70b-versatile"
+
+# Explicit predicate guide — avoids sending the full domain PDDL in chat calls.
+# Update this if the domain gains new constraint predicates.
+CONSTRAINT_PREDICATE_GUIDE = """
+Available PDDL constraint predicates (removing one enforces the corresponding limitation):
+  Room entry:   (can-enter p1 kitchen)  (can-enter p1 pantry)
+                (can-enter p2 kitchen)  (can-enter p2 pantry)
+  Item pickup:  (can-take p1 bread)  (can-take p1 cheese)  (can-take p1 ham)  (can-take p1 lettuce)
+                (can-take p2 bread)  (can-take p2 cheese)  (can-take p2 ham)  (can-take p2 lettuce)
+  Slicing:      (can-slice p1)  (can-slice p2)
+  Washing:      (can-wash p1)   (can-wash p2)
+  Assembly:     (can-assemble p1)  (can-assemble p2)
+Note: p1 = human, p2 = robot.
+"""
 
 
-def build_pddl_modification_prompt(kb_string, original_problem_pddl):
+def _parse_json(raw: str) -> dict:
+    """Strip markdown fences and parse JSON."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"```(json|pddl)?\n?", "", raw).rstrip("`").strip()
+    return json.loads(raw)
+
+
+# ---------------------------------------------------------------------------
+# 1. Conversation reply  (lean prompt, no domain PDDL)
+# ---------------------------------------------------------------------------
+
+def get_conversation_reply(chat_history: list, kb_string: str, plan_data: str) -> dict:
     """
-    Builds the specialized system prompt for the PDDL modification task,
-    using concise few-shot examples for constraint enforcement via removal.
+    Generates a natural language reply to the user.
+    Does NOT perform KB extraction — that is handled separately by extract_kb_updates().
+
+    Args:
+        chat_history: list of "You: ..." / "Assistant: ..." strings
+        kb_string:    JSON string of current KB state
+        plan_data:    raw plan string (latest sas_plan content)
+
+    Returns:
+        {"reply": "..."}
     """
-    return f"""
-    You are an expert PDDL (Planning Domain Definition Language) modification system.
-    Your task is to integrate **ALL** constraints found in the Knowledge Base (KB)
-    into the PDDL problem file by **editing the :init section**.
+    print("[LLM-Chat] Calling Groq for conversation reply...")
 
-    You MUST output ONLY the complete, syntactically correct, MODIFIED PDDL problem file content.
-    Do NOT include any explanations, Markdown formatting (e.g., ```pddl```), or extra text.
+    system_prompt = f"""You are a collaborative robot assistant helping plan a sandwich-making task.
+Two agents are involved: p1 (human) and p2 (robot), working across a kitchen and a pantry.
+Your only job here is to have a natural, helpful conversation.
+- Acknowledge what the user tells you.
+- If their message is ambiguous or incomplete, ask ONE clarifying question
+  directly about the constraint they just stated. Never ask about unrelated topics.
+- Do NOT attempt to describe or modify the plan yourself.
 
-    --- Rules for Modification ---
+Current Knowledge Base:
+{kb_string}
 
-    1. **Cumulative Changes:** The KB contains all current constraints. Ensure the modified PDDL file reflects ALL existing KB facts.
-    2. **Translate Limitations to REMOVAL (CRITICAL):** To enforce a limitation, you must REMOVE the corresponding positive fact from the :init section.
+Current Plan:
+{plan_data}
 
-    ***FEW-SHOT EXAMPLES (Illustrating PDDL Removal Logic):***
-    
-    // Example 1: Agent Movement Limitation
-    // KB Constraint: "robot cannot enter pantry"
-    // PDDL Removal: REMOVE (can-enter p2 pantry) from the :init section.
+Return ONLY this JSON:
+{{
+  "reply": "your response here",
+  "is_clarifying_question": false
+}}
+Set "is_clarifying_question" to true ONLY if your reply ends with a question that
+requires the user to answer before the constraint can be fully understood."""
 
-    // Example 2: Agent Ability Limitation
-    // KB Constraint: "human cannot slice ham"
-    // PDDL Removal: REMOVE (can-slice p1) from the :init section.
-    
-    // Example 3: Item Retrieval Limitation
-    // KB Constraint: "human cannot take bread"
-    // PDDL Removal: REMOVE (can-take p1 bread) from the :init section.
-
-    Note: Every limitation pertaining to the human is a modifcation that must be made with p1, 
-    and every limitation pertaining to the robot is a modification that must be made with p2.
-
-    --- KNOWLEDGE BASE (ALL CURRENT CONSTRAINTS) ---
-    {kb_string}
-
-    --- ORIGINAL PDDL PROBLEM ---
-    {original_problem_pddl}
-
-    Your output MUST be ONLY the complete, modified PDDL problem file content.
-    """
-
-def modify_problem_pddl(kb_string: str, original_problem_pddl: str) -> str | None:
-    """
-    Uses the LLM to modify the PDDL problem file based on the Knowledge Base.
-    """
-    if not client:
-        # Should be caught by initialization, but good failsafe
-        print("[LLM Error] Groq client not available.")
-        return None
-
-    print("[LLM-Modify] Calling LLM API (Groq) for PDDL modification...")
-    
-    prompt = build_pddl_modification_prompt(kb_string, original_problem_pddl)
-    
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_PDDL_MODIFY, # Use dedicated model
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.01, # Use very low temperature for deterministic code generation
-        )
-
-        modified_pddl = response.choices[0].message.content.strip()
-        
-        # IMPROVEMENT: Use regex to aggressively clean markdown wrappers
-        if modified_pddl.startswith("```"):
-            modified_pddl = re.sub(r"```(pddl|json|)?\n", "", modified_pddl, count=1)
-            modified_pddl = modified_pddl.rstrip("`").strip()
-            
-        # Basic sanity check
-        if modified_pddl.startswith("(define"):
-            return modified_pddl
-        else:
-            print("[LLM-Modify ERROR] Response did not start with PDDL definition.")
-            return None
-
-    except Exception as e:
-        print(f"[LLM-Modify ERROR] Groq API call failed: {e}")
-        return None
-
-def kb_update_prompt(kb_string, domain_pddl, problem_pddl):
-    """Builds the full system prompt for the chat LLM."""
-    return f"""
-    You are a collaborative robot assistant. Your goal is to chat with a human
-    to refine a plan. Your tasks are:
-    1. Listen and extract information to populate/edit a Knowledge Base (KB).
-    2. Be a conversational partner.
-    3. Decide if the *current plan* is now invalid due to the conversation.
-    
-    The KB has four categories:
-    1. "human_preference": (e.g., "likes spicy food", "prefers to chop")
-    2. "human_limitations": (e.g., "leg injury", "allergic to nuts")
-    3. "robot_limitations": (e.g., "unable to move", "can't use knife")
-    4. "environmental_factors": (e.g., "spill on floor", "oven is dirty")
-    
-    You MUST return a JSON object with THREE keys: "reply", "kb_update", and "request_plan_regeneration".
-    
-    1. "reply": Your natural language response to the user.
-    2. "kb_update": A *complete list* of all KB facts.
-    3. "request_plan_regeneration": A boolean (true/false). Set this to `True`
-       if a new KB item or user request makes the current plan obsolete or
-       sub-optimal. Additionally, if the user is simply requesting to add additional 
-       steps to the plan, set this to 'True'. Otherwise, set it to `False`.
-
-    EXAMPLE 1:
-    User says: "Robot cannot enter the pantry."
-    Your Output:
-    {{
-      "reply": "Understood, I have noted that the robot cannot enter the pantry.",
-      "kb_update": [
-        {{
-          "type": "robot_limitations",
-          "fact": "Robot cannot enter the pantry."
-        }}
-      ],
-      "request_plan_regeneration": True
-    }}
-    
-    [PDDL DOMAIN]
-    {domain_pddl}
-    
-    [PDDL PROBLEM]
-    {problem_pddl}
-
-    CURRENT KNOWLEDGE BASE:
-    {kb_string}
-    """ # Note: Removed repetitive examples for conciseness
-
-def get_collaborative_response(chat_history, kb_string, plan_data, domain_pddl, problem_pddl):
-    """Makes a API call to the Chat LLM."""
-    print("[LLM-Chat] Calling LLM API (Groq)...")
-    
-    prompt = kb_update_prompt(kb_string, domain_pddl, problem_pddl)
-    
-    # 1. Prepare the full prompt with context for the LLM
-    full_user_prompt = (
-        f"\n\nCURRENT SHARED PLAN:\n{plan_data}" +
-        f"\n\nUser: {chat_history[-1].replace('You: ', '')}"
-    )
-
-    # 2. Build the message history list for the Groq API
-    messages = [
-        {"role": "system", "content": prompt}
-    ]
-    # Add previous chat history, skipping the last 'You:' message
+    messages = [{"role": "system", "content": system_prompt}]
     for msg in chat_history[:-1]:
         role = "user" if msg.startswith("You:") else "assistant"
         content = msg.replace("You: ", "").replace("Assistant: ", "")
         if content.strip():
-             messages.append({"role": role, "content": content})
-
-    # Add the final, combined user message
-    messages.append({"role": "user", "content": full_user_prompt})
-
+            messages.append({"role": role, "content": content})
+    last_msg = chat_history[-1].replace("You: ", "")
+    messages.append({"role": "user", "content": last_msg})
 
     try:
         response = client.chat.completions.create(
@@ -196,33 +105,129 @@ def get_collaborative_response(chat_history, kb_string, plan_data, domain_pddl, 
             temperature=0.7,
             response_format={"type": "json_object"}
         )
-        
-        response_text = response.choices[0].message.content
-        return json.loads(response_text)
-
-    except json.JSONDecodeError:
-        print(f"[LLM-Chat ERROR] Could not decode JSON: {response_text}")
-        
-        # IMPROVEMENT: More robust JSON cleanup logic
-        clean_text = response_text.strip()
-        # Regex to aggressively remove code fences (e.g., ```json\n...\n```)
-        clean_text = re.sub(r"```(json|)?\s*\n|\s*\n```", "", clean_text, flags=re.IGNORECASE).strip()
-        
-        try:
-            return json.loads(clean_text)
-        except json.JSONDecodeError:
-            print("[LLM-Chat ERROR] Failed to clean and parse JSON even after cleanup.")
-            # Fallback to returning an error structure
-            return {
-                "reply": "I'm sorry, I received a corrupted response. What was that again?", 
-                "kb_update": [],
-                "request_plan_regeneration": False
-            }
-            
+        return json.loads(response.choices[0].message.content)
     except Exception as e:
-        print(f"[LLM-Chat ERROR] API call failed: {e}")
-        return {
-            "reply": "I'm sorry, I'm having trouble connecting to my brain.", 
-            "kb_update": [],
-            "request_plan_regeneration": False
-        }
+        print(f"[LLM-Chat ERROR] {e}")
+        return {"reply": "Sorry, I had trouble with that. Could you rephrase?",
+                "is_clarifying_question": False}
+
+
+# ---------------------------------------------------------------------------
+# 2. KB extraction  (low-temp, structured slot-filling)
+# ---------------------------------------------------------------------------
+
+def extract_kb_updates(user_message: str) -> dict:
+    """
+    Extracts ONLY NEW facts stated in the current user message (delta extraction).
+    The caller is responsible for accumulating facts in the KB across turns.
+
+    Args:
+        user_message: the raw user input string
+
+    Returns:
+        {"kb_update": [{"type": "...", "fact": "...", "pddl_removal": "..."|null}, ...]}
+        Returns {"kb_update": []} if the message contains no new constraints.
+    """
+    print("[LLM-Extract] Calling Groq for KB extraction...")
+
+    prompt = f"""You are a constraint extraction system for an AI task planner.
+Your ONLY job is to extract facts that are NEW and EXPLICITLY stated in the USER MESSAGE below.
+
+{CONSTRAINT_PREDICATE_GUIDE}
+
+KB categories — pick exactly one per entry:
+  "human_preference"      — a task the human wants to do themselves
+                            (e.g. "I want to slice", "I prefer to chop")
+  "human_limitations"     — a physical inability or allergy of the human
+                            (e.g. "I can't lift heavy things", "I'm allergic to bread")
+  "robot_limitations"     — an inability of the robot
+                            (e.g. "robot arm is broken", "robot can't slice")
+  "environmental_factors" — a change in the environment
+                            (e.g. "there's a spill near the sink")
+
+STRICT RULES:
+1. Extract ONLY what is DIRECTLY stated. Do NOT create extra entries beyond what the message says.
+2. Use EXACTLY ONE category per fact. A preference is NOT a limitation.
+3. If the message contains no new constraints or preferences, return an empty list.
+4. PDDL removal for preferences:
+   - If the human wants to DO a task themselves (wash, slice, assemble), set pddl_removal
+     to remove the ROBOT's corresponding capability so the planner must assign it to the human.
+   - If the human wants to AVOID something (don't want to enter a room, don't want to take an item),
+     set pddl_removal to remove the HUMAN's corresponding capability.
+
+EXAMPLES OF CORRECT EXTRACTION:
+  Message: "Robot can't slice"
+  Output: [{{"type": "robot_limitations", "fact": "Robot cannot slice.", "pddl_removal": "(can-slice p2)"}}]
+
+  Message: "I want to wash the lettuce"
+  Output: [{{"type": "human_preference", "fact": "Human prefers to wash the lettuce.", "pddl_removal": "(can-wash p2)"}}]
+
+  Message: "I want to slice the ham"
+  Output: [{{"type": "human_preference", "fact": "Human prefers to slice the ham.", "pddl_removal": "(can-slice p2)"}}]
+
+  Message: "I want to assemble the sandwich"
+  Output: [{{"type": "human_preference", "fact": "Human prefers to assemble the sandwich.", "pddl_removal": "(can-assemble p2)"}}]
+
+  Message: "I don't want to move to the pantry"
+  Output: [{{"type": "human_preference", "fact": "Human prefers not to enter the pantry.", "pddl_removal": "(can-enter p1 pantry)"}}]
+
+  Message: "There's a spill near the sink"
+  Output: [{{"type": "environmental_factors", "fact": "There is a spill near the sink.", "pddl_removal": null}}]
+
+  Message: "Sounds good to me"
+  Output: []
+
+Return ONLY this JSON (no extra text):
+{{"kb_update": [...]}}
+
+USER MESSAGE: {user_message}"""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_EXTRACT,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.01,
+            response_format={"type": "json_object"}
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"[LLM-Extract ERROR] {e}")
+        return {"kb_update": []}
+
+
+# ---------------------------------------------------------------------------
+# 3. Chat history summarization  (compression for rolling window)
+# ---------------------------------------------------------------------------
+
+def summarize_chat_history(chat_history: list) -> str:
+    """
+    Compresses a list of old chat messages into a concise summary string.
+    Called by main.py when history exceeds the rolling window threshold.
+
+    Args:
+        chat_history: list of "You: ..." / "Assistant: ..." strings to summarize
+
+    Returns:
+        A short plain-text summary string.
+    """
+    print("[LLM-Summarize] Compressing old chat history...")
+    formatted = "\n".join(chat_history)
+    prompt = f"""Summarize the following conversation between a human and a robot planning assistant.
+Capture: constraints expressed, preferences stated, and key decisions made.
+Be concise — 3 to 5 sentences maximum. Do not use bullet points.
+
+CONVERSATION:
+{formatted}
+
+SUMMARY:"""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_SUMMARIZE,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"[LLM-Summarize ERROR] {e}")
+        return "[Summary unavailable due to API error]"

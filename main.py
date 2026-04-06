@@ -1,55 +1,46 @@
 import textwrap
 import sys
-import json
+import re
 import subprocess
+import shutil
 from pathlib import Path
-import shutil # Added for file copy
 from knowledge_base import KnowledgeBase
-from llm_engine_gemini import modify_problem_pddl, get_collaborative_response
+from llm_engine_groq import get_conversation_reply, extract_kb_updates, summarize_chat_history
 
-DOMAIN_FILE = Path("pddl/domain.pddl")
+DOMAIN_FILE           = Path("pddl/domain.pddl")
 ORIGINAL_PROBLEM_FILE = Path("pddl/problem.pddl")
-CURRENT_PROBLEM_FILE = Path("current_problem.pddl") 
+CURRENT_PROBLEM_FILE  = Path("current_problem.pddl")
 
-CURRENT_PROBLEM_FILE.parent.mkdir(parents=True, exist_ok=True) 
+# Rolling history settings
+MAX_HISTORY_TURNS    = 10   # Keep this many recent messages verbatim
+SUMMARIZE_THRESHOLD  = 18   # Trigger compression once history exceeds this
+
+CURRENT_PROBLEM_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# PDDL Solver
+# ---------------------------------------------------------------------------
 
 def run_pddl_solver(problem_path=CURRENT_PROBLEM_FILE):
-    solver_dir = Path("downward")
+    solver_dir    = Path("downward")
     solver_script = "./fast-downward.py"
-    domain_pddl = DOMAIN_FILE
-    
-    problem_relative_path = Path("..") / problem_path
-    domain_relative_path = Path("..") / domain_pddl
-    
-    command = [
-        str(solver_script),
-        str(domain_relative_path),
-        str(problem_relative_path),
-        "--search",
-        "astar(lmcut())"
-    ]
-    
+    problem_rel   = Path("..") / problem_path
+    domain_rel    = Path("..") / DOMAIN_FILE
+
+    command = [str(solver_script), str(domain_rel), str(problem_rel),
+               "--search", "astar(lmcut())"]
     try:
-        result = subprocess.run(
-            command,
-            cwd=solver_dir,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        
+        result = subprocess.run(command, cwd=solver_dir,
+                                capture_output=True, text=True, check=True)
         plan_path = solver_dir / "sas_plan"
         if plan_path.exists():
-            with open(plan_path, 'r') as f:
-                sas_plan_content = f.read()
-            return sas_plan_content
-        else:
-            print("[Solver ERROR] Solver ran successfully, but 'sas_plan' file was not created.")
-            print("Solver Output:\n", result.stdout)
-            return None
-
+            return plan_path.read_text()
+        print("[Solver ERROR] Solver ran but 'sas_plan' was not created.")
+        print("Solver Output:\n", result.stdout)
+        return None
     except subprocess.CalledProcessError as e:
-        print(f"[Solver ERROR] Fast Downward failed with exit code {e.returncode}.")
+        print(f"[Solver ERROR] Fast Downward failed (exit {e.returncode}).")
         print("STDOUT:", e.stdout)
         print("STDERR:", e.stderr)
         return None
@@ -57,132 +48,191 @@ def run_pddl_solver(problem_path=CURRENT_PROBLEM_FILE):
         print("[Solver ERROR] Could not find the Fast Downward executable.")
         return None
 
+
+# ---------------------------------------------------------------------------
+# PDDL Modification (programmatic — no LLM)
+# ---------------------------------------------------------------------------
+
+def apply_kb_to_pddl(kb, source_path, target_path):
+    """
+    Reads the original PDDL problem, removes all predicates listed in the KB,
+    validates the result, and writes it to target_path.
+
+    Constraint enforcement is purely string-based — no LLM involved.
+    Always rebuilds from source_path so stale edits never accumulate.
+    """
+    try:
+        content = source_path.read_text()
+    except FileNotFoundError:
+        print(f"[PDDL Error] Source file not found: {source_path}")
+        return False
+
+    removals = kb.get_pddl_removals()
+
+    if not removals:
+        shutil.copy(source_path, target_path)
+        print("[PDDL] No constraints to apply — using original problem.")
+        return True
+
+    for predicate in removals:
+        # Remove the predicate and the newline that preceded it
+        escaped = re.escape(predicate)
+        content = re.sub(r'\n[ \t]*' + escaped + r'[ \t]*', '', content)
+
+    # Tidy up runs of blank lines left behind
+    content = re.sub(r'\n{3,}', '\n\n', content)
+
+    valid, err = validate_pddl(content)
+    if not valid:
+        print(f"[PDDL Validation Error] {err}")
+        return False
+
+    target_path.write_text(content)
+    print(f"[PDDL] Modified problem saved to: {target_path}")
+    print(f"[PDDL] Removed {len(removals)} predicate(s): {removals}")
+    return True
+
+
+def validate_pddl(content: str):
+    """
+    Basic sanity checks before writing PDDL to disk.
+    Catches the most common LLM output errors early.
+    """
+    stripped = content.strip()
+    if not stripped.startswith("(define"):
+        return False, "Does not start with '(define'"
+    open_count  = stripped.count('(')
+    close_count = stripped.count(')')
+    if open_count != close_count:
+        return False, f"Unbalanced parentheses ({open_count} open, {close_count} close)"
+    return True, None
+
+
+# ---------------------------------------------------------------------------
+# Plan Display & Diff
+# ---------------------------------------------------------------------------
+
+def _parse_actions(raw_plan_str):
+    if not raw_plan_str:
+        return []
+    return [l.strip() for l in raw_plan_str.split('\n')
+            if l.strip() and not l.strip().startswith(';')]
+
+
 def print_plan(raw_plan_string):
     plan_data = {"plan": []}
     if not raw_plan_string:
         print("  (No plan steps yet)")
         return plan_data
 
-    actions = [line.strip() for line in raw_plan_string.split('\n') 
-               if line.strip() and not line.strip().startswith(';')]
-
+    actions = _parse_actions(raw_plan_string)
     for i, action in enumerate(actions):
-        
         assigned_to = "N/A"
-        
-        # --- FIXED LOGIC: Determine assignment by checking for agent marker in the string ---
-        # The agent marker (p1 or p2) is not consistently the last word, so checking its presence
-        # is the most robust way to assign the task.
         if " p1" in action:
             assigned_to = "Human"
         elif " p2" in action:
             assigned_to = "Robot"
-        # --- END FIXED LOGIC ---
-            
-        task_str = action.strip('()')
-        
         plan_data["plan"].append({
             "step": i + 1,
-            "task": task_str,
+            "task": action.strip('()'),
             "assigned_to": assigned_to
         })
 
-    print("  " + "-"*60)
-    print(f"  {'Step':<5} | {'Assigned To':<11} | {'Task':<35}") 
-    print("  " + "-"*60)
-    
-    for item in plan_data.get("plan", []):
-        step = item.get('step', '?')
-        task = item.get('task', 'No task defined')
-        assigned = item.get('assigned_to', 'N/A')
-    
-        task_str = str(task)
-        
-        print(f"  {step:<5} | {assigned:<11} | {task_str:<35}")
-    print("  " + "-"*60)
-    
+    print("  " + "-" * 60)
+    print(f"  {'Step':<5} | {'Assigned To':<11} | {'Task':<35}")
+    print("  " + "-" * 60)
+    for item in plan_data["plan"]:
+        print(f"  {item['step']:<5} | {item['assigned_to']:<11} | {str(item['task']):<35}")
+    print("  " + "-" * 60)
     return plan_data
 
 
+def diff_plans(old_plan_str, new_plan_str):
+    """Prints a human-readable diff between two raw plan strings."""
+    old = _parse_actions(old_plan_str)
+    new = _parse_actions(new_plan_str)
+    old_set = set(old)
+    new_set = set(new)
+
+    removed = [a for a in old if a not in new_set]
+    added   = [a for a in new if a not in old_set]
+    kept    = [a for a in new if a in old_set]
+
+    print("\n  PLAN DIFF:")
+    print("  " + "-" * 50)
+    if not removed and not added:
+        print("  (No changes to plan actions)")
+    for a in removed:
+        print(f"  - REMOVED : {a.strip('()')}")
+    for a in added:
+        print(f"  + ADDED   : {a.strip('()')}")
+    print(f"  = UNCHANGED: {len(kept)} step(s)")
+    print("  " + "-" * 50)
+
+
 def print_ui(kb, plan):
-    """
-    Simulates the Dual-Panel UI in the terminal.
-    """
     print("\n" + "=" * 80)
-    
     print("PANEL 1: SHARED PLAN")
     print("-" * 38)
     print_plan(plan)
-            
-    print("\n" + "PANEL 2: KNOWLEDGE BASE")
+    print("\nPANEL 2: KNOWLEDGE BASE")
     print("-" * 38)
-    
-    kb_str = kb.get_state_as_string()
-    print(textwrap.indent(kb_str, "  "))
-    
+    print(textwrap.indent(kb.get_state_as_string(), "  "))
     print("=" * 80 + "\n")
+
+
+# ---------------------------------------------------------------------------
+# File Loading
+# ---------------------------------------------------------------------------
 
 def load_domain_pddl():
     try:
-        with open(DOMAIN_FILE, 'r') as f:
-            domain_pddl_content = f.read()
-        return domain_pddl_content
+        return DOMAIN_FILE.read_text()
     except FileNotFoundError:
         print(f"[ERROR] Domain file not found: {DOMAIN_FILE}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"[ERROR] Could not read domain file: {e}")
         sys.exit(1)
 
 def load_problem_pddl():
     try:
-        with open(ORIGINAL_PROBLEM_FILE, 'r') as f:
-            problem_pddl_content = f.read()
-        return problem_pddl_content
+        return ORIGINAL_PROBLEM_FILE.read_text()
     except FileNotFoundError:
         print(f"[ERROR] Problem file not found: {ORIGINAL_PROBLEM_FILE}")
         sys.exit(1)
-    except Exception as e:
-        print(f"[ERROR] Could not read problem file: {e}")
-        sys.exit(1)
 
-def llm_update_problem_pddl(kb, original_problem_pddl_content, target_file_path=CURRENT_PROBLEM_FILE):
+
+# ---------------------------------------------------------------------------
+# Chat History Management
+# ---------------------------------------------------------------------------
+
+def manage_history(chat_history):
     """
-    Calls the LLM to modify the PDDL problem file based on the Knowledge Base.
-    Saves the new PDDL content to target_file_path.
-    Returns True on success, False otherwise.
+    If history exceeds SUMMARIZE_THRESHOLD, compress older messages into a
+    single summary entry and prepend it to the recent window.
     """
-    print("🔄 LLM modifying problem.pddl based on Knowledge Base...")
-    
-    new_pddl_content = modify_problem_pddl(
-        kb_string=kb.get_state_as_string(),
-        original_problem_pddl=original_problem_pddl_content
-    )
-    
-    if not new_pddl_content:
-        print("[LLM Error] LLM failed to generate a new PDDL file.")
-        return False
+    if len(chat_history) <= SUMMARIZE_THRESHOLD:
+        return chat_history
 
-    try:
-        with open(target_file_path, "w") as f:
-            f.write(new_pddl_content)
-        print(f"New PDDL problem file saved to: {target_file_path}")
-        return True
-    except Exception as e:
-        print(f"[System Error] Could not write new PDDL file: {e}")
-        return False
+    print("[History] Compressing old conversation history...")
+    to_summarize = chat_history[:-MAX_HISTORY_TURNS]
+    recent       = chat_history[-MAX_HISTORY_TURNS:]
+    summary      = summarize_chat_history(to_summarize)
+    return [f"[CONVERSATION SUMMARY]: {summary}"] + recent
 
+
+# ---------------------------------------------------------------------------
+# Main Loop
+# ---------------------------------------------------------------------------
 
 def main():
-    kb = KnowledgeBase()
-    chat_history = []
+    kb            = KnowledgeBase()
+    chat_history  = []
     latest_raw_plan = None
-    
+
     print("--- Collaborative HRI Prototype ---")
 
-    domain_pddl = load_domain_pddl()
-    problem_pddl = load_problem_pddl()
-    
+    load_domain_pddl()   # validate file exists early; content not needed in prompts
+    problem_pddl = load_problem_pddl()  # kept for reference/display only
+
     try:
         shutil.copy(ORIGINAL_PROBLEM_FILE, CURRENT_PROBLEM_FILE)
         print(f"Initial problem copied to {CURRENT_PROBLEM_FILE}")
@@ -190,87 +240,119 @@ def main():
         print(f"[ERROR] Could not copy initial problem file: {e}")
         sys.exit(1)
 
-    print("\n Running PDDL Solver for initial plan...")
+    print("\nRunning PDDL Solver for initial plan...")
     latest_raw_plan = run_pddl_solver(CURRENT_PROBLEM_FILE)
-    
+
     if not latest_raw_plan:
         print("[ERROR] Initial plan generation failed. Exiting.")
         sys.exit(1)
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("INITIAL PLAN GENERATED")
-    print("="*80)
-    print("Assistant: I've generated an initial plan based on the PDDL files.")
-    print("Let's review it. You can enter your preferences or constraints to update the plan.")
-    
-    # --- 2. ITERATIVE PLANNING LOOP ---
+    print("=" * 80)
+    print("Assistant: I've generated an initial plan. Share any preferences or")
+    print("           constraints and I'll update the plan accordingly.")
+
+    # Holds the original user message when a clarifying question is pending.
+    # On the next turn the answer is combined with this for extraction context.
+    pending_user_input = None
 
     while True:
-        # A. Display the current state (KB and latest plan)
+        # A. Display current state
         print_ui(kb, latest_raw_plan)
 
-        # B. Get Human input/updates
-        user_input = input("You (Enter preferences or type '/finish'): ").strip()
-        
+        # B. Get human input
+        user_input = input("You (or '/finish' to finalize): ").strip()
+
         if user_input.lower() == "/quit":
-            print("Exiting prototype. Goodbye!")
+            print("Exiting. Goodbye!")
             break
-
         if user_input.lower() == "/finish":
-            print("\n👋 User requested to finish planning.")
-            print("The latest generated plan will be used for the next part.")
+            print("\nUser finished planning.")
             break
 
-        # C. Process input to update KB
-        print("🧠 LLM analyzing human input to update KB...")
-        
         chat_history.append(f"You: {user_input}")
 
-        # Use the existing function to process the user input and get regeneration request
-        response_data = get_collaborative_response(
+        # C. Conversational reply — lean call, no domain PDDL
+        reply_data = get_conversation_reply(
             chat_history=chat_history,
             kb_string=kb.get_state_as_string(),
-            plan_data=latest_raw_plan, 
-            domain_pddl=domain_pddl,
-            problem_pddl=problem_pddl
+            plan_data=latest_raw_plan
         )
-
-        reply = response_data.get("reply", "I'm not sure what to say.")
-        kb_updates = response_data.get("kb_update", [])
-        regenerate_plan = response_data.get("request_plan_regeneration", False)
-        
+        reply = reply_data.get("reply", "I'm not sure what to say.")
+        is_clarifying = reply_data.get("is_clarifying_question", False)
         print(f"\nAssistant: {reply}")
-        chat_history.append(f"Assistant: {reply}") # Store assistant reply for context
+        chat_history.append(f"Assistant: {reply}")
+
+        # If the assistant asked a clarifying question, save the original
+        # message and wait for the user's answer before extracting anything.
+        if is_clarifying:
+            pending_user_input = user_input
+            continue
+
+        # D. Structured extraction — low-temp, delta only (new facts this turn).
+        # If this turn answers a clarifying question, build a combined context so
+        # the extractor understands what the one-word answer refers to.
+        if pending_user_input is not None:
+            # Reconstruct the clarifying exchange for the extractor
+            clarifying_question = chat_history[-2].replace("Assistant: ", "")
+            extraction_context = (
+                f"User originally said: \"{pending_user_input}\"\n"
+                f"Assistant asked: \"{clarifying_question}\"\n"
+                f"User confirmed: \"{user_input}\""
+            )
+            pending_user_input = None
+        else:
+            extraction_context = user_input
+
+        extract_data = extract_kb_updates(user_message=extraction_context)
+        kb_updates = extract_data.get("kb_update", [])
 
         if kb_updates:
-            kb.update_kb_from_llm(kb_updates)
-            print("Knowledge Base updated based on user input.")
+            # Show proposed changes and ask for confirmation
+            print("\nProposed KB updates:")
+            for u in kb_updates:
+                if isinstance(u, dict):
+                    print(f"  [{u.get('type', '?')}] {u.get('fact', '')}")
+                    if u.get('pddl_removal'):
+                        print(f"    -> PDDL: remove {u['pddl_removal']}")
 
-        # D. Regenerate plan if required by the LLM
-        if regenerate_plan:
-            # 1. LLM updates the problem file copy based on the new KB
-            if llm_update_problem_pddl(kb, problem_pddl, CURRENT_PROBLEM_FILE):
-                # 2. Run solver on the new problem file to get the new plan
-                print("\n🚀 Running PDDL Solver on modified problem to get new plan...")
-                new_raw_plan = run_pddl_solver(CURRENT_PROBLEM_FILE)
-                
-                if new_raw_plan:
-                    latest_raw_plan = new_raw_plan
-                    print("New Plan Generated and ready for review.")
+            confirm = input("\nApply these changes? [y/n]: ").strip().lower()
+            if confirm == 'y':
+                # E. Programmatic regeneration detection (KB diff, not LLM-decided)
+                kb_snapshot = kb.get_state_as_string()
+                kb.update_kb_from_llm(kb_updates)
+                regenerate_plan = (kb.get_state_as_string() != kb_snapshot)
+
+                if regenerate_plan:
+                    # F. Programmatic PDDL modification — no LLM needed
+                    if apply_kb_to_pddl(kb, ORIGINAL_PROBLEM_FILE, CURRENT_PROBLEM_FILE):
+                        print("\nRunning PDDL Solver on modified problem...")
+                        new_raw_plan = run_pddl_solver(CURRENT_PROBLEM_FILE)
+
+                        if new_raw_plan:
+                            diff_plans(latest_raw_plan, new_raw_plan)
+                            latest_raw_plan = new_raw_plan
+                            print("New plan ready.")
+                        else:
+                            print("[Solver Error] Could not generate new plan. Keeping previous.")
+                    else:
+                        print("[PDDL Error] Modification failed. Keeping previous plan.")
                 else:
-                    print("[Solver Error] PDDL solver failed to generate a new plan.")
-                    print("Continuing with the previous plan for review.")
+                    print("[KB] No effective change detected — plan unchanged.")
             else:
-                print("[System Error] PDDL modification failed. Continuing with previous plan.")
+                print("Changes discarded.")
 
-    # --- 3. FINAL OUTPUT ---
-    
-    print("\n" + "="*80)
+        # G. Rolling history management
+        chat_history = manage_history(chat_history)
+
+    # Final output
+    print("\n" + "=" * 80)
     print("FINAL PLAN FOR EXECUTION")
-    print("="*80)
+    print("=" * 80)
     print_plan(latest_raw_plan)
-    print(f"\n[System] Final problem state saved in: {CURRENT_PROBLEM_FILE}")
-    print("[System] The program now moves to the next part using this plan and problem file.")
+    print(f"\n[System] Final problem state: {CURRENT_PROBLEM_FILE}")
+    print("[System] Run 'python3 app.py' to launch the web simulation.")
 
 
 if __name__ == "__main__":

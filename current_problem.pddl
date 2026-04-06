@@ -47,17 +47,15 @@
     ;; --- Room Types ---
     (is-kitchen kitchen)
 
-
     ;; --- HRC CONSTRAINT INITIALIZATIONS ---
 
     ;; Room Permissions
     (can-enter p1 kitchen)
-    (can-enter p1 pantry)
     (can-enter p2 kitchen)
     (can-enter p2 pantry)
 
     ;; Ability to take items
-    ;; (can-take p1 bread) -- REMOVED: human is allergic to bread
+    (can-take p1 bread)
     (can-take p1 cheese)
     (can-take p1 ham)
     (can-take p1 lettuce)
@@ -69,15 +67,12 @@
 
     ;; Ability to slice with knife
     (can-slice p1)
-    ;; (can-slice p2) -- REMOVED: robot can't slice ham
 
     ;; Ability to wash
     (can-wash p1)
-    ;; (can-wash p2) -- REMOVED: robot can't wash lettuce
 
     ;; Ability to assemble the sandwich
     (can-assemble p1)
-    (can-assemble p2)
   )
 
   (:goal
