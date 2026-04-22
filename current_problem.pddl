@@ -51,8 +51,8 @@
 
     ;; Room Permissions
     (can-enter p1 kitchen)
+    (can-enter p1 pantry)
     (can-enter p2 kitchen)
-    (can-enter p2 pantry)
 
     ;; Ability to take items
     (can-take p1 bread)
@@ -66,7 +66,7 @@
     (can-take p2 lettuce)
 
     ;; Ability to slice with knife
-    (can-slice p1)
+    (can-slice p2)
 
     ;; Ability to wash
     (can-wash p1)

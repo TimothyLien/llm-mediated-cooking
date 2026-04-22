@@ -7,9 +7,11 @@ from pathlib import Path
 from knowledge_base import KnowledgeBase
 from llm_engine_groq import get_conversation_reply, extract_kb_updates, summarize_chat_history
 
-DOMAIN_FILE           = Path("pddl/domain.pddl")
-ORIGINAL_PROBLEM_FILE = Path("pddl/problem.pddl")
-CURRENT_PROBLEM_FILE  = Path("current_problem.pddl")
+_SIMPLE_MODE = "--simple" in sys.argv
+
+DOMAIN_FILE           = Path("pddl/domain_simple.pddl") if _SIMPLE_MODE else Path("pddl/domain.pddl")
+ORIGINAL_PROBLEM_FILE = Path("pddl/problem_simple.pddl") if _SIMPLE_MODE else Path("pddl/problem.pddl")
+CURRENT_PROBLEM_FILE  = Path("current_problem_simple.pddl") if _SIMPLE_MODE else Path("current_problem.pddl")
 
 # Rolling history settings
 MAX_HISTORY_TURNS    = 10   # Keep this many recent messages verbatim
