@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import json
 import re
@@ -21,9 +22,9 @@ except Exception as e:
     sys.exit(1)
 
 # Separate model names allow independent tuning per task
-MODEL_CHAT = "llama-3.3-70b-versatile"
-MODEL_EXTRACT = "llama-3.3-70b-versatile"
-MODEL_SUMMARIZE = "llama-3.3-70b-versatile"
+MODEL_CHAT      = "openai/gpt-oss-120b"    # strongest available — best for natural conversation quality
+MODEL_EXTRACT   = "qwen/qwen3-32b"         # excellent structured JSON output and constraint reasoning
+MODEL_SUMMARIZE = "llama-3.1-8b-instant"   # simplest task — fastest model keeps history compression invisible
 
 # Explicit predicate guide — avoids sending the full domain PDDL in chat calls.
 # Update this if the domain gains new constraint predicates.
@@ -31,11 +32,8 @@ CONSTRAINT_PREDICATE_GUIDE = """
 Available PDDL constraint predicates (removing one enforces the corresponding limitation):
   Room entry:   (can-enter p1 kitchen)  (can-enter p1 pantry)
                 (can-enter p2 kitchen)  (can-enter p2 pantry)
-  Item pickup:  (can-take p1 bread)  (can-take p1 cheese)  (can-take p1 ham)  (can-take p1 lettuce)
-                (can-take p2 bread)  (can-take p2 cheese)  (can-take p2 ham)  (can-take p2 lettuce)
-  Slicing:      (can-slice p1)  (can-slice p2)
-  Washing:      (can-wash p1)   (can-wash p2)
-  Assembly:     (can-assemble p1)  (can-assemble p2)
+  Item pickup:  (can-take p1 bread)  (can-take p1 ham)  (can-take p1 cheese)  (can-take p1 lettuce)
+                (can-take p2 bread)  (can-take p2 ham)  (can-take p2 cheese)  (can-take p2 lettuce)
 Note: p1 = human, p2 = robot.
 """
 
@@ -49,10 +47,67 @@ def _parse_json(raw: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 0. Opening introduction  (called once at startup)
+# ---------------------------------------------------------------------------
+
+def get_introduction(plan_steps: str) -> str:
+    """
+    Generates a warm, first-person introduction spoken by the robot.
+    Called once at startup, before the conversation loop begins.
+
+    Args:
+        plan_steps: a plain-English numbered list of the initial plan steps
+
+    Returns:
+        A natural-language introduction string.
+    """
+    prompt = f"""You are a friendly collaborative robot assistant named Stretch.
+You are about to work alongside a human on a fetch-and-swap task in a kitchen setting.
+There are four ingredients: bread and ham currently in the pantry, and cheese and lettuce
+currently in the kitchen. The goal is to swap them — bread and ham should end up in the
+kitchen, and cheese and lettuce should end up in the pantry.
+You and the human will divide the steps between yourselves.
+
+Based on the initial plan below, introduce yourself to the human in 3–4 sentences.
+Your introduction should:
+  1. Briefly say who you are and what you're here to help with.
+  2. Describe the goal of the task in plain, everyday language (no jargon).
+  3. Mention that you've already put together an initial plan and invite them to review it.
+  4. Let them know they can ask you to change who does what, or flag any limitations.
+
+Keep the tone warm, clear, and conversational — like a helpful colleague, not a manual.
+Do NOT use bullet points. Do NOT mention PDDL, predicates, or any technical terms.
+Write in first person as Stretch.
+
+Initial plan:
+{plan_steps}
+
+Reply with only the introduction text, nothing else."""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_CHAT,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.8,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        # Fallback if the API call fails
+        return (
+            "Hi! I'm Stretch, your robot assistant. Today we're going to work together "
+            "to swap some ingredients between the kitchen and the pantry — bread and ham "
+            "need to come into the kitchen, while cheese and lettuce need to go to the pantry. "
+            "I've put together an initial plan for us — take a look and let me know "
+            "if you'd like to adjust who handles which steps."
+        )
+
+
+# ---------------------------------------------------------------------------
 # 1. Conversation reply  (lean prompt, no domain PDDL)
 # ---------------------------------------------------------------------------
 
-def get_conversation_reply(chat_history: list, kb_string: str, plan_data: str) -> dict:
+def get_conversation_reply(chat_history: list, kb_string: str, plan_data: str,
+                           system_prompt_override: str | None = None) -> dict:
     """
     Generates a natural language reply to the user.
     Does NOT perform KB extraction — that is handled separately by extract_kb_updates().
@@ -65,9 +120,11 @@ def get_conversation_reply(chat_history: list, kb_string: str, plan_data: str) -
     Returns:
         {"reply": "..."}
     """
-    print("[LLM-Chat] Calling Groq for conversation reply...")
 
-    system_prompt = f"""You are a collaborative robot assistant helping plan a sandwich-making task.
+    if system_prompt_override:
+        system_prompt = system_prompt_override
+    else:
+        system_prompt = f"""You are a collaborative robot assistant helping plan a sandwich-making task.
 Two agents are involved: p1 (human) and p2 (robot), working across a kitchen and a pantry.
 Your only job here is to have a natural, helpful conversation.
 - Acknowledge what the user tells you.
@@ -128,7 +185,6 @@ def extract_kb_updates(user_message: str) -> dict:
         {"kb_update": [{"type": "...", "fact": "...", "pddl_removal": "..."|null}, ...]}
         Returns {"kb_update": []} if the message contains no new constraints.
     """
-    print("[LLM-Extract] Calling Groq for KB extraction...")
 
     prompt = f"""You are a constraint extraction system for an AI task planner.
 Your ONLY job is to extract facts that are NEW and EXPLICITLY stated in the USER MESSAGE below.
@@ -210,7 +266,6 @@ def summarize_chat_history(chat_history: list) -> str:
     Returns:
         A short plain-text summary string.
     """
-    print("[LLM-Summarize] Compressing old chat history...")
     formatted = "\n".join(chat_history)
     prompt = f"""Summarize the following conversation between a human and a robot planning assistant.
 Capture: constraints expressed, preferences stated, and key decisions made.
@@ -231,3 +286,210 @@ SUMMARY:"""
     except Exception as e:
         print(f"[LLM-Summarize ERROR] {e}")
         return "[Summary unavailable due to API error]"
+
+
+# ---------------------------------------------------------------------------
+# 4. Phase opening messages
+# ---------------------------------------------------------------------------
+
+def get_replanning_opening(world_state_summary: str, failure_reason: str,
+                           steps_completed: int, plan_steps_str: str,
+                           stopped_by_user: bool = False) -> str:
+    """Opening message for the REPLAN phase after an execution stop or failure."""
+    if stopped_by_user:
+        prompt = f"""You are Stretch, a collaborative robot assistant. The human just manually stopped the task.
+
+Current world state: {world_state_summary}
+Steps completed before stop: {steps_completed}
+
+Updated remaining plan steps (replanned from current position):
+{plan_steps_str}
+
+In 2-3 sentences, acknowledge the human stopped, confirm you've updated the plan to reflect
+how far we got, and warmly ask them what made them want to stop and how they'd like to proceed.
+Be non-judgmental and curious. Do NOT use bullet points. Write in first person as Stretch."""
+    else:
+        prompt = f"""You are Stretch, a collaborative robot assistant. An issue occurred during task execution.
+
+Current world state: {world_state_summary}
+What went wrong: {failure_reason}
+Steps completed before failure: {steps_completed}
+
+Updated remaining plan steps (replanned from current position):
+{plan_steps_str}
+
+In 2-3 sentences, explain what went wrong in plain language, confirm you've updated the plan
+to continue from where things stand now, and invite the human to discuss how to proceed.
+Keep it warm and non-technical. Do NOT use bullet points. Write in first person as Stretch."""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_CHAT,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        if stopped_by_user:
+            return ("I noticed you stopped the task. I've updated the plan to reflect our progress — "
+                    "what made you want to stop, and how would you like to proceed?")
+        return (f"I had to stop — {failure_reason}. I've updated the plan from our current position. "
+                "Let's figure out how to continue from here.")
+
+
+def get_posttask_opening(world_state_summary: str, incident_log: list[dict],
+                         session_notes: list[str]) -> str:
+    """Opening message for the POST_TASK phase after task completion."""
+    incidents_text = ""
+    if incident_log:
+        recent = incident_log[-3:]
+        incidents_text = "\n".join(
+            f"- {i.get('trigger', 'unknown')}: {i.get('resolution', 'no resolution')}"
+            for i in recent
+        )
+
+    notes_text = "\n".join(f"- {n}" for n in session_notes[-5:]) if session_notes else "(none)"
+
+    prompt = f"""You are Stretch, a collaborative robot assistant. The task has just been completed.
+
+Current world state: {world_state_summary}
+Recent incidents: {incidents_text or "(none)"}
+Past session notes: {notes_text}
+
+In 2-3 sentences, congratulate the human on completing the task, briefly mention anything
+noteworthy that happened (failures, replans), and invite them to reflect on how it went.
+Keep it warm and conversational. Do NOT use bullet points. Write in first person as Stretch."""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_CHAT,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return ("Great work — the task is complete! Let's take a moment to reflect on "
+                "how it went and if there's anything we should remember for next time.")
+
+
+# ---------------------------------------------------------------------------
+# 5. Proactive proposals  (POST_TASK phase)
+# ---------------------------------------------------------------------------
+
+def get_proactive_proposals(chat_history: list, kb_string: str,
+                            incident_log: list[dict]) -> str:
+    """
+    After the human has spoken in POST_TASK, suggest 1-2 concrete improvements
+    the robot noticed based on what happened. Returns plain text (not JSON).
+    """
+    recent_chat = "\n".join(chat_history[-6:])
+    recent_incidents = json.dumps(incident_log[-3:], indent=2) if incident_log else "[]"
+
+    prompt = f"""You are Stretch, a collaborative robot. The task is done and you're debriefing.
+
+Recent conversation:
+{recent_chat}
+
+Recent incidents:
+{recent_incidents}
+
+Current preferences/constraints:
+{kb_string}
+
+Based on what happened, suggest 1-2 specific, actionable improvements for next time.
+Examples: "Next time I could carry the bread and ham together to save a trip."
+Keep each suggestion to one sentence. Be concrete, not vague. Do NOT say "great job" again."""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_CHAT,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return "I think we worked well together. Let me know if there's anything to improve."
+
+
+# ---------------------------------------------------------------------------
+# 6. State update parsing  (REPLAN phase — observer describes what changed)
+# ---------------------------------------------------------------------------
+
+def parse_state_update(user_message: str, current_world_summary: str) -> dict:
+    """
+    Parse a free-text observer description into structured world state changes.
+
+    Returns:
+        {
+          "moves": [{"agent": "p2", "room": "pantry"}, ...],
+          "takes": [{"agent": "p2", "item": "cheese"}, ...],
+          "drops": [{"agent": "p2", "item": "cheese", "room": "kitchen"}, ...]
+        }
+    """
+    prompt = f"""Extract world state changes from this observer message.
+
+Current world state: {current_world_summary}
+Observer message: "{user_message}"
+
+Extract any of the following events:
+- An agent (p1=human, p2=robot) moving to a room (kitchen or pantry)
+- An agent picking up an item (bread, ham, cheese, lettuce)
+- An agent putting down an item in a room
+
+Return ONLY this JSON:
+{{
+  "moves": [{{"agent": "p1|p2", "room": "kitchen|pantry"}}],
+  "takes": [{{"agent": "p1|p2", "item": "bread|ham|cheese|lettuce"}}],
+  "drops": [{{"agent": "p1|p2", "item": "bread|ham|cheese|lettuce", "room": "kitchen|pantry"}}]
+}}
+Use empty lists if nothing of that type was described."""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_EXTRACT,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.01,
+            response_format={"type": "json_object"},
+        )
+        return json.loads(response.choices[0].message.content)
+    except Exception as e:
+        print(f"[LLM-StateUpdate ERROR] {e}")
+        return {"moves": [], "takes": [], "drops": []}
+
+
+# ---------------------------------------------------------------------------
+# 7. Post-task session note extraction
+# ---------------------------------------------------------------------------
+
+def extract_session_note(chat_history: list, kb_string: str) -> str | None:
+    """
+    After a POST_TASK conversation, distil one concise note worth remembering
+    for future sessions. Returns None if there is nothing worth saving.
+    """
+    formatted = "\n".join(chat_history[-12:])
+    prompt = f"""After a post-task debrief, extract ONE short note worth remembering for next time.
+Focus on: new preferences discovered, recurring failures, or useful strategies.
+
+Conversation:
+{formatted}
+
+Current KB:
+{kb_string}
+
+If there is something worth remembering, return it as a single sentence (max 25 words).
+If there is nothing new to record, return null.
+
+Return ONLY this JSON: {{"note": "..." | null}}"""
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_EXTRACT,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+        result = json.loads(response.choices[0].message.content)
+        return result.get("note")
+    except Exception as e:
+        print(f"[LLM-Note ERROR] {e}")
+        return None

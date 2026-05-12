@@ -4,7 +4,7 @@
   (:objects
     p1 p2 - agent
     kitchen pantry - room
-    bread cheese ham lettuce - item
+    bread ham cheese lettuce - item
   )
 
   (:init
@@ -20,7 +20,7 @@
     (connected pantry kitchen)
 
     ;; --- Item Locations ---
-    ;; cheese and lettuce already in kitchen; bread and ham in pantry (need fetching)
+    ;; cheese and lettuce start in kitchen; bread and ham start in pantry
     (in-room cheese kitchen)
     (in-room lettuce kitchen)
     (in-room bread pantry)
@@ -36,23 +36,23 @@
 
     ;; Item pickup permissions
     (can-take p1 bread)
-    (can-take p1 cheese)
     (can-take p1 ham)
+    (can-take p1 cheese)
     (can-take p1 lettuce)
 
     (can-take p2 bread)
-    (can-take p2 cheese)
     (can-take p2 ham)
+    (can-take p2 cheese)
     (can-take p2 lettuce)
   )
 
-  ;; Goal: all ingredients gathered in the kitchen
+  ;; Goal: swap locations — bread/ham move to kitchen, cheese/lettuce move to pantry
   (:goal
     (and
       (in-room bread kitchen)
-      (in-room cheese kitchen)
       (in-room ham kitchen)
-      (in-room lettuce kitchen)
+      (in-room cheese pantry)
+      (in-room lettuce pantry)
     )
   )
 )

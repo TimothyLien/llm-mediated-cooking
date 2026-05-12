@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 class KnowledgeBase:
 
@@ -9,7 +10,6 @@ class KnowledgeBase:
             "robot_limitations": [],
             "environmental_factors": []
         }
-        print("[KB] KnowledgeBase initialized (empty).")
 
     def reset(self):
         self.state = {
@@ -18,7 +18,7 @@ class KnowledgeBase:
             "robot_limitations": [],
             "environmental_factors": []
         }
-        print("[KB] KnowledgeBase reset to empty state.")
+        pass
 
     def get_state_as_string(self):
         """
@@ -69,24 +69,17 @@ class KnowledgeBase:
         if not updates_data:
             return
 
-        print("[KB] Appending update(s) from LLM...")
-
         if isinstance(updates_data, dict):
             for category, facts_list in updates_data.items():
                 if category in self.state and isinstance(facts_list, list):
                     for fact in facts_list:
                         self.state[category].append(fact)
-                        label = fact.get("fact") if isinstance(fact, dict) else fact
-                        removal = fact.get("pddl_removal") if isinstance(fact, dict) else None
-                        print(f"[KB] Added to '{category}': {label}" +
-                              (f" → remove {removal}" if removal else ""))
                 else:
-                    print(f"[KB Warning] Unknown category or bad format: '{category}'")
+                    pass  # unknown category — silently skip
 
         elif isinstance(updates_data, list):
             for update in updates_data:
                 if not isinstance(update, dict):
-                    print(f"[KB Warning] Skipping non-dict item: {update}")
                     continue
 
                 category = update.get("type")
@@ -98,9 +91,25 @@ class KnowledgeBase:
                     if pddl_removal:
                         entry["pddl_removal"] = pddl_removal
                     self.state[category].append(entry)
-                    print(f"[KB] Added to '{category}': {fact_text}" +
-                          (f" → remove {pddl_removal}" if pddl_removal else ""))
-                else:
-                    print(f"[KB Warning] Unknown category or missing fact: '{category}'")
-        else:
-            print(f"[KB ERROR] Unexpected update format: {type(updates_data)}")
+                # else: unknown category or missing fact — silently skip
+        # else: unexpected format — silently ignore
+
+    # -----------------------------------------------------------------------
+    # Persistence
+    # -----------------------------------------------------------------------
+
+    def load_from_file(self, path: Path) -> None:
+        """Replace current state with contents of a JSON file (if it exists)."""
+        try:
+            data = json.loads(path.read_text())
+            if isinstance(data, dict):
+                for category in self.state:
+                    if category in data and isinstance(data[category], list):
+                        self.state[category] = data[category]
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+
+    def save_to_file(self, path: Path) -> None:
+        """Write current state to a JSON file, creating parent dirs as needed."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(self.state, indent=2))

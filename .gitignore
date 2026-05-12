@@ -6,3 +6,11 @@ __pycache__/
 *.pyc
 
 .DS_Store
+
+# Runtime-generated PDDL files
+current_problem.pddl
+current_problem_simple.pddl
+current_problem_replan.pddl
+
+# Persistent memory (session-specific, not part of the repo)
+memory/
