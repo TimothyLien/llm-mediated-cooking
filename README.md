@@ -266,7 +266,7 @@ llm-mediated-cooking/
 - **World state tracked manually.** The observer marks steps done in the dashboard — there is no automatic sensor-based tracking. This tolerates hardware uncertainty and network lag.
 - **Single conversation engine.** All three phases share one `run_conversation_phase()` loop, parameterized by `PhaseConfig`.
 
-For a full technical reference see [`codebase-analysis-docs/CODEBASE_KNOWLEDGE.md`](codebase-analysis-docs/CODEBASE_KNOWLEDGE.md).
+For a full technical reference see [`CODEBASE_KNOWLEDGE.md`](CODEBASE_KNOWLEDGE.md).
 
 ---
 
